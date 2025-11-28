@@ -1,0 +1,131 @@
+name: Run Parallel Processing Notebook
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches:
+      - main
+    paths:
+      - 'Parallel Processing.ipynb'
+      - '.github/workflows/run-notebook.yml'
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight UTC
+
+jobs:
+  run-notebook:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install jupyter nbconvert pandas numpy requests matplotlib seaborn mlxtend scipy scikit-learn
+        
+    - name: Execute notebook
+      run: |
+        jupyter nbconvert --to notebook --execute --inplace "Parallel Processing.ipynb" --ExecutePreprocessor.timeout=3600
+        
+    - name: Convert notebook to HTML
+      run: |
+        jupyter nbconvert --to html "Parallel Processing.ipynb" --output "Parallel_Processing_Results.html"
+        
+    - name: Extract outputs and create summary
+      run: |
+        python - <<'EOF'
+        import json
+        import os
+        from datetime import datetime
+        
+        # Read the executed notebook
+        with open('Parallel Processing.ipynb', 'r', encoding='utf-8') as f:
+            notebook = json.load(f)
+        
+        # Create a summary file
+        summary = []
+        summary.append(f"# Parallel Processing Notebook Results\n")
+        summary.append(f"Execution Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n")
+        
+        # Count cells and outputs
+        code_cells = sum(1 for cell in notebook['cells'] if cell['cell_type'] == 'code')
+        cells_with_output = sum(1 for cell in notebook['cells'] 
+                               if cell['cell_type'] == 'code' and cell.get('outputs'))
+        
+        summary.append(f"## Summary Statistics\n")
+        summary.append(f"- Total Code Cells: {code_cells}\n")
+        summary.append(f"- Cells with Output: {cells_with_output}\n\n")
+        
+        # Extract text outputs
+        summary.append(f"## Execution Outputs\n\n")
+        for i, cell in enumerate(notebook['cells'], 1):
+            if cell['cell_type'] == 'code' and cell.get('outputs'):
+                summary.append(f"### Cell {i}\n")
+                for output in cell['outputs']:
+                    if output.get('output_type') == 'stream':
+                        text = ''.join(output.get('text', []))
+                        if text.strip():
+                            summary.append(f"```\n{text}\n```\n\n")
+                    elif output.get('output_type') == 'execute_result':
+                        if 'text/plain' in output.get('data', {}):
+                            text = ''.join(output['data']['text/plain'])
+                            summary.append(f"```\n{text}\n```\n\n")
+        
+        # Write summary
+        with open('RESULTS_SUMMARY.md', 'w', encoding='utf-8') as f:
+            f.writelines(summary)
+        
+        print("Summary created successfully!")
+        EOF
+        
+    - name: Create timestamp
+      id: timestamp
+      run: echo "timestamp=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_OUTPUT
+      
+    - name: Archive artifacts
+      run: |
+        mkdir -p release_artifacts
+        cp "Parallel Processing.ipynb" release_artifacts/
+        cp "Parallel_Processing_Results.html" release_artifacts/
+        cp RESULTS_SUMMARY.md release_artifacts/
+        
+        # Check if CSV was downloaded and include it (optional, might be large)
+        if [ -f "Trips_2018.csv" ]; then
+          echo "CSV file exists but skipping from release (too large)"
+          # Uncomment next line if you want to include the CSV
+          # cp Trips_2018.csv release_artifacts/
+        fi
+        
+        # Create a zip file
+        cd release_artifacts
+        zip -r ../notebook-results-${{ steps.timestamp.outputs.timestamp }}.zip .
+        cd ..
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: notebook-results-${{ steps.timestamp.outputs.timestamp }}
+        path: release_artifacts/
+        retention-days: 90
+        
+    - name: Create Release
+      if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: results-${{ steps.timestamp.outputs.timestamp }}
+        name: Notebook Results - ${{ steps.timestamp.outputs.timestamp }}
+        body_path: RESULTS_SUMMARY.md
+        files: |
+          notebook-results-${{ steps.timestamp.outputs.timestamp }}.zip
+          Parallel_Processing_Results.html
+          Parallel Processing.ipynb
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
